@@ -1,18 +1,26 @@
+# streamlit_app.py
 import re
 import io
 import calendar
+from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 
 import pandas as pd
 import streamlit as st
 
+# ============================================================
+# App Config
+# ============================================================
 st.set_page_config(page_title="Multi-Store Report Calculator", layout="wide")
 st.title("Multi-Store Report Calculator")
-st.caption("Paste up to 8 'Worker Sales by Product Category' reports. Calculates Net Sales (Sales - PSP), exact-calendar prorated goals, and totals.")
+st.caption(
+    "Paste up to 8 'Worker Sales by Product Category' reports. "
+    "Calculates Net Sales (Sales - PSP), exact-calendar prorated goals, Air-to-Ground %, and labor budget vs actual."
+)
 
-# -----------------------------
-# Defaults (Feb goals you provided)
-# -----------------------------
+# ============================================================
+# Defaults (Centers + Feb goals you provided)
+# ============================================================
 CENTER_NAMES = {
     "1504": "Yucaipa",
     "5027": "Beaumont",
@@ -35,14 +43,224 @@ FEB_GOALS_2026 = {
     "7261": 59600.0,
 }
 
-# -----------------------------
+# Kiosk group assignment (labor tables)
+KIOSK_GROUP = {
+    "kiosk_1": {"5778", "6176", "6769", "7261"},
+    "kiosk_2": {"1504", "5027", "5052", "5255"},
+}
+
+# Each row: (sales, budget_hours, labor_pct, budget_labor_dollars)
+LABOR_BUDGET_KIOSK_1 = [
+    (10000, 175, 0.38, 1700),
+    (10500, 176, 0.36, 1785),
+    (11000, 177, 0.35, 1870),
+    (11500, 178, 0.33, 1955),
+    (12000, 179, 0.32, 2040),
+    (12500, 180, 0.31, 2125),
+    (13000, 181, 0.30, 2210),
+    (13500, 182, 0.29, 2295),
+    (14000, 183, 0.28, 2380),
+    (14500, 184, 0.27, 2465),
+    (15000, 185, 0.27, 2550),
+    (15500, 186, 0.26, 2635),
+    (16000, 187, 0.25, 2720),
+    (16500, 188, 0.24, 2805),
+    (17000, 189, 0.24, 2890),
+    (17500, 190, 0.23, 2975),
+    (18000, 191, 0.23, 3060),
+    (18500, 192, 0.22, 3145),
+    (19000, 193, 0.22, 3230),
+    (19500, 194, 0.21, 3315),
+    (20000, 195, 0.21, 3400),
+    (21000, 196, 0.20, 3570),
+    (22000, 197, 0.19, 3740),
+    (23000, 198, 0.19, 3910),
+    (24000, 199, 0.18, 4080),
+    (25000, 200, 0.17, 4250),
+]
+
+LABOR_BUDGET_KIOSK_2 = [
+    (10000, 168, 0.36, 1700),
+    (10500, 169, 0.35, 1785),
+    (11000, 170, 0.33, 1870),
+    (11500, 171, 0.32, 1955),
+    (12000, 172, 0.31, 2040),
+    (12500, 173, 0.30, 2125),
+    (13000, 174, 0.29, 2210),
+    (13500, 175, 0.28, 2295),
+    (14000, 176, 0.27, 2380),
+    (14500, 177, 0.26, 2465),
+    (15000, 178, 0.26, 2550),
+    (15500, 179, 0.25, 2635),
+    (16000, 180, 0.24, 2720),
+    (16500, 181, 0.24, 2805),
+    (17000, 182, 0.23, 2890),
+    (17500, 183, 0.22, 2975),
+    (18000, 184, 0.22, 3060),
+    (18500, 185, 0.22, 3145),
+    (19000, 186, 0.21, 3230),
+    (19500, 187, 0.21, 3315),
+    (20000, 188, 0.20, 3400),
+    (21000, 189, 0.19, 3570),
+    (22000, 190, 0.19, 3740),
+    (23000, 191, 0.18, 3910),
+    (24000, 192, 0.17, 4080),
+    (25000, 193, 0.17, 4250),
+]
+
+# Category alias map (makes parsing resilient to small naming differences)
+CATEGORY_ALIASES = {
+    "Shipping Charges (UPS)": [
+        "Shipping Charges (UPS)",
+        "Shipping Charges - UPS",
+        "UPS Shipping Charges",
+        "Shipping Charges UPS",
+    ],
+    "Public Service Payments": [
+        "Public Service Payments",
+        "Public Svcs Payments",
+        "PSP",
+    ],
+    "Mailbox Service": [
+        "Mailbox Service",
+        "Mailbox",
+        "Mailboxes",
+    ],
+    "Meter Mail": [
+        "Meter Mail",
+        "Meter",
+        "Postage Meter",
+    ],
+    "Packaging Service Fee": [
+        "Packaging Service Fee",
+        "Packing Service Fee",
+        "Packaging Service Fees",
+        "Packing Service Fees",
+    ],
+    "Packaging Materials": [
+        "Packaging Materials",
+        "Packing Materials",
+    ],
+    "Retail Shipping Supplies": [
+        "Retail Shipping Supplies",
+        "Shipping Supplies",
+        "Retail Supplies",
+    ],
+    "Office Supplies": [
+        "Office Supplies",
+        "Supplies",
+    ],
+    "Printing": [
+        "Printing",
+        "Print",
+    ],
+    "Copies": [
+        "Copies",
+        "Copy",
+    ],
+    "Color Copies": [
+        "Color Copies",
+        "Colour Copies",
+    ],
+    "Notary": [
+        "Notary",
+        "Notary Service",
+    ],
+    "Shred": [
+        "Shred",
+        "Shredding",
+        "Shred Sales",
+        "Shredding Sales",
+    ],
+}
+
+# UPS service keywords for Air-to-Ground (by customer_count/packages)
+UPS_AIR_KEYWORDS = [
+    "nda",
+    "next day air",
+    "next-day air",
+    "2da",
+    "2nd day air",
+    "second day air",
+    "2-day air",
+    "3 day",
+    "3day",
+    "3-day",
+    "3 day select",
+    "3ds",
+]
+
+UPS_GROUND_KEYWORDS = [
+    "ground",
+    "gnd",
+]
+
+# ============================================================
+# Data Structures
+# ============================================================
+@dataclass
+class ParsedReport:
+    center: str | None
+    date_range_str: str | None
+    start_date: date | None
+    end_date: date | None
+    rows: dict
+    totals: dict | None
+    raw_text: str
+
+
+# ============================================================
 # Helpers
-# -----------------------------
+# ============================================================
+def normalize_report_text(text: str) -> str:
+    """Normalize whitespace and common special characters."""
+    if text is None:
+        return ""
+    text = text.replace("\t", " ")
+    text = re.sub(r"[–—]", "-", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Collapse multiple spaces per line; preserve line breaks
+    text = "\n".join(re.sub(r"[ ]{2,}", " ", line).strip() for line in text.splitlines())
+    return text.strip()
+
+
+def split_reports(raw: str) -> list[str]:
+    """
+    Split a big paste into individual reports.
+    Works with explicit separators or repeated header occurrences.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+
+    # Strong separators
+    seps = ["\n-----\n", "\n—\n", "\n=====\n", "\n---\n"]
+    for sep in seps:
+        if sep in raw:
+            parts = [p.strip() for p in raw.split(sep) if p.strip()]
+            if len(parts) > 1:
+                return parts
+
+    # Header split fallback
+    header_pat = re.compile(r"(Worker Sales by Product Category)", re.IGNORECASE)
+    hits = list(header_pat.finditer(raw))
+    if len(hits) <= 1:
+        return [raw]
+
+    parts = []
+    for i, h in enumerate(hits):
+        start = h.start()
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(raw)
+        parts.append(raw[start:end].strip())
+    return [p for p in parts if p]
+
+
 def money_to_float(s: str) -> float:
     return float(s.replace(",", "").replace("$", "").strip())
 
+
 def parse_date_any(s: str):
-    s = s.strip()
+    s = (s or "").strip()
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt).date()
@@ -50,30 +268,88 @@ def parse_date_any(s: str):
             pass
     return None
 
-def parse_worker_sales_by_category(text: str):
-    # Center
+
+def find_field_block_value(text: str, field_name: str) -> str | None:
+    """
+    Many reports are formatted like:
+      Center:
+      6176
+    or
+      Date Range:
+      2/9/2026
+      to
+      2/15/2026
+    This helper tries to capture the next non-empty line(s) after a field label.
+    """
+    pattern = re.compile(rf"^{re.escape(field_name)}\s*:\s*$", re.IGNORECASE | re.MULTILINE)
+    m = pattern.search(text)
+    if not m:
+        return None
+
+    after = text[m.end() :].splitlines()
+    # find the first non-empty line after label
+    for line in after:
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def parse_worker_sales_by_category(text: str) -> ParsedReport:
+    """
+    Parses:
+    - Center
+    - Date Range
+    - Category rows (income + counts)
+    - Totals row
+    """
+    text = normalize_report_text(text)
+
+    # Center: try block form first, then regex
     center = None
-    m = re.search(r"Center:\s*\n(\d+)", text, flags=re.IGNORECASE)
-    if m:
-        center = m.group(1).strip()
+    center_line = find_field_block_value(text, "Center")
+    if center_line and re.fullmatch(r"\d{3,5}", center_line):
+        center = center_line.strip()
+    else:
+        m = re.search(r"Center:\s*(\d+)", text, flags=re.IGNORECASE)
+        if m:
+            center = m.group(1).strip()
 
     # Date range
     start_date = end_date = None
-    m = re.search(r"Date Range:\s*\n([0-9/]+)\s*\nto\s*\n([0-9/]+)", text, flags=re.IGNORECASE)
+    date_range_str = None
+
+    # block style:
+    # Date Range:
+    # 2/9/2026
+    # to
+    # 2/15/2026
+    m = re.search(
+        r"Date Range:\s*\n([0-9/]+)\s*\n(?:to|-)\s*\n([0-9/]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
     if m:
         start_date = parse_date_any(m.group(1))
         end_date = parse_date_any(m.group(2))
+    else:
+        # inline style
+        m2 = re.search(r"Date Range:\s*([0-9/]+)\s*(?:to|-)\s*([0-9/]+)", text, flags=re.IGNORECASE)
+        if m2:
+            start_date = parse_date_any(m2.group(1))
+            end_date = parse_date_any(m2.group(2))
 
-    date_range_str = None
     if start_date and end_date:
         date_range_str = f"{start_date.month}/{start_date.day}/{start_date.year} to {end_date.month}/{end_date.day}/{end_date.year}"
     elif m:
         date_range_str = f"{m.group(1).strip()} to {m.group(2).strip()}"
 
-    # Rows
+    # Category rows
+    # Expect lines like:
+    # + Shipping Charges (UPS) 117 184 $6,437.09 $55.01 $34.98
+    # We'll allow multiple spaces and slightly varied formatting.
     row_re = re.compile(
         r"^[\+\-]\s*(.+?)\s+(\d+)\s+(\d+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s*$",
-        flags=re.MULTILINE
+        flags=re.MULTILINE,
     )
 
     rows = {}
@@ -88,12 +364,12 @@ def parse_worker_sales_by_category(text: str):
         }
 
     # Totals line
+    totals = None
     m = re.search(
         r"^Totals\s+(\d+)\s+(\d+)\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s+\$([\d,]+\.\d{2})\s*$",
         text,
-        flags=re.MULTILINE | re.IGNORECASE
+        flags=re.MULTILINE | re.IGNORECASE,
     )
-    totals = None
     if m:
         totals = {
             "customer_count": int(m.group(1)),
@@ -103,22 +379,24 @@ def parse_worker_sales_by_category(text: str):
             "item_avg": money_to_float(m.group(5)),
         }
 
-    meta = {
-        "center": center,
-        "date_range": date_range_str,
-        "start_date": start_date,
-        "end_date": end_date,
-    }
-    return meta, rows, totals
+    return ParsedReport(
+        center=center,
+        date_range_str=date_range_str,
+        start_date=start_date,
+        end_date=end_date,
+        rows=rows,
+        totals=totals,
+        raw_text=text,
+    )
 
-def get_income(rows, category_name, default=0.0):
-    return rows.get(category_name, {}).get("income", default)
-
-def get_customer_count(rows, category_name, default=0):
-    return rows.get(category_name, {}).get("customer_count", default)
 
 def fmt_money(x):
     return "—" if x is None or pd.isna(x) else f"${x:,.2f}"
+
+
+def fmt_pct(x):
+    return "—" if x is None or pd.isna(x) else f"{x:.1%}"
+
 
 def daterange_inclusive(d1: date, d2: date):
     cur = d1
@@ -126,11 +404,14 @@ def daterange_inclusive(d1: date, d2: date):
         yield cur
         cur += timedelta(days=1)
 
+
 def is_sunday(d: date) -> bool:
     return d.weekday() == 6  # Monday=0 ... Sunday=6
 
+
 def month_days(year: int, month: int):
     return calendar.monthrange(year, month)[1]
+
 
 def count_sundays_in_month(year: int, month: int) -> int:
     sundays = 0
@@ -140,7 +421,8 @@ def count_sundays_in_month(year: int, month: int) -> int:
             sundays += 1
     return sundays
 
-def prorated_goal_exact_calendar(monthly_goal: float, start: date, end: date, six_day_store: bool) -> float:
+
+def prorated_goal_exact_calendar(monthly_goal: float, start: date, end: date, six_day_store: bool) -> float | None:
     """
     Exact calendar proration, day-by-day (handles ranges that span months).
     - 7-day store: daily goal = monthly_goal / days_in_month
@@ -168,10 +450,143 @@ def prorated_goal_exact_calendar(monthly_goal: float, start: date, end: date, si
 
     return total
 
-# -----------------------------
+
+def get_kiosk_type(center: str) -> str | None:
+    if center in KIOSK_GROUP["kiosk_1"]:
+        return "kiosk_1"
+    if center in KIOSK_GROUP["kiosk_2"]:
+        return "kiosk_2"
+    return None
+
+
+def labor_budget_table(center: str):
+    kt = get_kiosk_type(center)
+    if kt == "kiosk_1":
+        return LABOR_BUDGET_KIOSK_1
+    if kt == "kiosk_2":
+        return LABOR_BUDGET_KIOSK_2
+    return None
+
+
+def pick_labor_budget(center: str, projected_sales: float | None):
+    """
+    Returns dict with budget_hours, budget_labor_dollars, labor_pct.
+    Uses the closest bracket at or above sales; if above max, uses max bracket.
+    """
+    table = labor_budget_table(center)
+    if not table or projected_sales is None or pd.isna(projected_sales):
+        return {"budget_hours": None, "budget_labor_dollars": None, "budget_labor_pct": None}
+
+    ps = float(projected_sales)
+
+    for sales, hrs, pct, dollars in table:
+        if ps <= sales:
+            return {"budget_hours": float(hrs), "budget_labor_dollars": float(dollars), "budget_labor_pct": float(pct)}
+
+    # cap
+    sales, hrs, pct, dollars = table[-1]
+    return {"budget_hours": float(hrs), "budget_labor_dollars": float(dollars), "budget_labor_pct": float(pct)}
+
+
+def find_row_key(rows: dict, canonical: str) -> str | None:
+    """Return the best matching key in rows for a canonical category name."""
+    if canonical in rows:
+        return canonical
+
+    # exact alias hits
+    for alias in CATEGORY_ALIASES.get(canonical, []):
+        if alias in rows:
+            return alias
+
+    # partial match fallback
+    canon_low = canonical.lower()
+    for k in rows.keys():
+        if canon_low in k.lower():
+            return k
+
+    return None
+
+
+def find_income(rows: dict, canonical: str, default=0.0):
+    k = find_row_key(rows, canonical)
+    if k is None:
+        return default
+    return rows.get(k, {}).get("income", default)
+
+
+def find_customer_count(rows: dict, canonical: str, default=0):
+    k = find_row_key(rows, canonical)
+    if k is None:
+        return default
+    return int(rows.get(k, {}).get("customer_count", default) or 0)
+
+
+def classify_ups_domestic_service(category: str) -> str | None:
+    """
+    Returns 'air', 'ground', or None based on the category name.
+    This expects the report to have service-level UPS Domestic lines (NDA/2DA/3 Day/Ground).
+    """
+    if not category:
+        return None
+    c = category.lower()
+
+    # must be UPS shipping related (service lines often include UPS domestic service names)
+    if "ups" not in c and "shipping" not in c:
+        return None
+
+    # ignore international if present (optional)
+    if "international" in c:
+        return None
+
+    if any(k in c for k in UPS_AIR_KEYWORDS):
+        return "air"
+    if any(k in c for k in UPS_GROUND_KEYWORDS):
+        return "ground"
+
+    return None
+
+
+def compute_air_ground_counts(rows: dict) -> dict:
+    """
+    Sums customer_count across UPS Domestic service lines.
+    If service lines aren't present, returns None values.
+    """
+    air_pkgs = 0
+    ground_pkgs = 0
+    found_service_lines = False
+
+    for cat, payload in rows.items():
+        svc = classify_ups_domestic_service(cat)
+        if svc is None:
+            continue
+        found_service_lines = True
+        cnt = int(payload.get("customer_count", 0) or 0)
+        if svc == "air":
+            air_pkgs += cnt
+        elif svc == "ground":
+            ground_pkgs += cnt
+
+    if not found_service_lines:
+        return {"air_pkgs": None, "ground_pkgs": None, "domestic_pkgs": None, "air_to_ground_pct": None}
+
+    domestic = air_pkgs + ground_pkgs
+    air_pct = (air_pkgs / domestic) if domestic else None
+    return {"air_pkgs": air_pkgs, "ground_pkgs": ground_pkgs, "domestic_pkgs": domestic, "air_to_ground_pct": air_pct}
+
+
+# ============================================================
 # UI: Multi store input
-# -----------------------------
+# ============================================================
 st.subheader("Paste Reports (up to 8)")
+
+with st.expander("Optional: Paste ALL reports in one box (auto-split)", expanded=False):
+    big_paste = st.text_area(
+        "Paste multiple reports here. Tip: separate reports with ----- or just paste them back-to-back (header split).",
+        height=250,
+        placeholder="Paste multiple full reports here...",
+        key="big_paste",
+    )
+
 cols = st.columns(2, gap="large")
 report_texts = []
 for i in range(8):
@@ -179,25 +594,30 @@ for i in range(8):
         report_texts.append(
             st.text_area(
                 f"Store Report #{i+1}",
-                height=220,
-                placeholder="Paste one full 'Worker Sales by Product Category' report here..."
+                height=200,
+                placeholder="Paste one full 'Worker Sales by Product Category' report here...",
+                key=f"report_{i+1}",
             )
         )
 
 st.divider()
+
+# ============================================================
+# Goals Editor
+# ============================================================
 st.subheader("Monthly Goals + Store Workweek")
+st.caption("Goals prefilled for Feb 2026. Check which centers are 6-day stores (closed Sundays).")
 
-st.caption("Goals prefilled for Feb 2026. Check the two centers that are 6-day stores (closed Sundays).")
-
-# Prefill table with your 8 centers
 prefill_rows = []
-for c in ["1504","5027","5052","5255","5778","6176","6769","7261"]:
-    prefill_rows.append({
-        "Center": c,
-        "Store": CENTER_NAMES.get(c, ""),
-        "Monthly Goal ($)": FEB_GOALS_2026.get(c, None),
-        "6-Day Store (Closed Sundays)": False,  # YOU CHECK the two stores here
-    })
+for c in ["1504", "5027", "5052", "5255", "5778", "6176", "6769", "7261"]:
+    prefill_rows.append(
+        {
+            "Center": c,
+            "Store": CENTER_NAMES.get(c, ""),
+            "Monthly Goal ($)": FEB_GOALS_2026.get(c, None),
+            "6-Day Store (Closed Sundays)": False,  # you can check the two stores here
+        }
+    )
 
 goals_df = pd.DataFrame(prefill_rows)
 
@@ -211,14 +631,60 @@ goals_df = st.data_editor(
         "Monthly Goal ($)": st.column_config.NumberColumn(min_value=0),
         "6-Day Store (Closed Sundays)": st.column_config.CheckboxColumn(),
     },
-    key="goals_editor"
+    key="goals_editor",
 )
+
+st.divider()
+
+# ============================================================
+# Labor Section
+# ============================================================
+st.subheader("Labor (Budget vs Actual)")
+
+labor_sales_basis = st.radio(
+    "Which sales number should drive the labor chart lookup?",
+    options=["Total Sales", "Net Sales (Sales - PSP)"],
+    horizontal=True,
+)
+
+labor_input_rows = []
+for c in ["1504", "5027", "5052", "5255", "5778", "6176", "6769", "7261"]:
+    labor_input_rows.append(
+        {
+            "Center": c,
+            "Store": CENTER_NAMES.get(c, ""),
+            "Kiosk Table": get_kiosk_type(c) or "",
+            "Actual Labor Hours": None,
+        }
+    )
+
+labor_df = pd.DataFrame(labor_input_rows)
+
+labor_df = st.data_editor(
+    labor_df,
+    use_container_width=True,
+    num_rows="fixed",
+    column_config={
+        "Center": st.column_config.TextColumn(disabled=True),
+        "Store": st.column_config.TextColumn(disabled=True),
+        "Kiosk Table": st.column_config.TextColumn(disabled=True),
+        "Actual Labor Hours": st.column_config.NumberColumn(min_value=0),
+    },
+    key="labor_editor",
+)
+
+st.caption(
+    "Budget $ and % come from your kiosk labor chart brackets. "
+    "Estimated actual labor $ uses the chart's implied hourly rate (Budget$ / BudgetHours)."
+)
+
+st.divider()
 
 process = st.button("Process All Reports", type="primary", use_container_width=True)
 
-# -----------------------------
+# ============================================================
 # Processing
-# -----------------------------
+# ============================================================
 if process:
     # Build goal lookup
     goal_lookup = {}
@@ -229,59 +695,97 @@ if process:
         if c and pd.notna(g):
             goal_lookup[c] = (float(g), s6)
 
+    # Build actual labor lookup
+    actual_hours_lookup = {}
+    for _, r in labor_df.iterrows():
+        c = str(r.get("Center") or "").strip()
+        ah = r.get("Actual Labor Hours")
+        if c and pd.notna(ah):
+            actual_hours_lookup[c] = float(ah)
+
+    # Determine the source reports list:
+    # - If big paste provided, use it (up to 8)
+    # - Otherwise use the 8 text areas as provided
+    sources = []
+    if (big_paste or "").strip():
+        sources = split_reports(big_paste)[:8]
+        # If fewer than 8 in big paste, fill remainder from manual boxes
+        if len(sources) < 8:
+            for t in report_texts:
+                if t.strip():
+                    sources.append(t)
+                if len(sources) >= 8:
+                    break
+    else:
+        sources = report_texts
+
+    diagnostics = []
     rows_out = []
 
-    for idx, text in enumerate(report_texts, start=1):
-        if not text.strip():
+    for idx, text in enumerate(sources, start=1):
+        if not (text or "").strip():
             continue
 
-        meta, rows, totals = parse_worker_sales_by_category(text)
-
-        center = (meta.get("center") or "").strip()
+        report = parse_worker_sales_by_category(text)
+        center = (report.center or "").strip()
         store_name = CENTER_NAMES.get(center, "")
-        date_range = meta.get("date_range") or ""
-        start_date = meta.get("start_date")
-        end_date = meta.get("end_date")
+        date_range = report.date_range_str or ""
+        start_date = report.start_date
+        end_date = report.end_date
+        rows = report.rows
+        totals = report.totals
+
+        # Diagnostics: missing key parts
+        if not center:
+            diagnostics.append(f"Report #{idx}: Could not detect Center.")
+        if not (start_date and end_date):
+            diagnostics.append(f"Report #{idx} ({center or 'Unknown'}): Could not detect Date Range.")
+        if not totals:
+            diagnostics.append(f"Report #{idx} ({center or 'Unknown'}): Could not detect Totals row.")
 
         # Total sales from Totals row
         total_sales = totals["income"] if totals else None
 
-        # Locked to Shipping Charges (UPS)
-        ups_shipping = get_income(rows, "Shipping Charges (UPS)", default=None)
-        ups_packages = get_customer_count(rows, "Shipping Charges (UPS)", default=0) or None
+        # UPS Shipping (income) - aggregated line
+        ups_shipping = find_income(rows, "Shipping Charges (UPS)", default=None)
 
-        meter_sales = get_income(rows, "Meter Mail", default=None)
-        mailbox_sales = get_income(rows, "Mailbox Service", default=None)
+        # UPS package count - if aggregate line exists, use it; else fallback to domestic service lines sum
+        ups_packages = find_customer_count(rows, "Shipping Charges (UPS)", default=0) or 0
+        air_ground = compute_air_ground_counts(rows)
 
-        notary_income = get_income(rows, "Notary", default=0.0)
-        psp_income = get_income(rows, "Public Service Payments", default=0.0)
+        # If aggregate UPS packages missing but we have domestic service lines, use domestic_pkgs for per-package calcs
+        ups_domestic_pkgs = air_ground["domestic_pkgs"] if air_ground["domestic_pkgs"] is not None else None
+        pkgs_for_avgs = ups_packages if ups_packages > 0 else (ups_domestic_pkgs or 0)
+        pkgs_for_avgs = pkgs_for_avgs if pkgs_for_avgs > 0 else None
+
+        meter_sales = find_income(rows, "Meter Mail", default=None)
+        mailbox_sales = find_income(rows, "Mailbox Service", default=None)
+
+        notary_income = find_income(rows, "Notary", default=0.0)
+        psp_income = find_income(rows, "Public Service Payments", default=0.0)
         notary_plus_psp = notary_income + psp_income
 
         # Net Sales (Sales - PSP)
         net_sales = (total_sales - psp_income) if (total_sales is not None) else None
 
         printing_copies = (
-            get_income(rows, "Printing", default=0.0)
-            + get_income(rows, "Copies", default=0.0)
-            + get_income(rows, "Color Copies", default=0.0)
+            find_income(rows, "Printing", default=0.0)
+            + find_income(rows, "Copies", default=0.0)
+            + find_income(rows, "Color Copies", default=0.0)
         )
 
         packaging_bucket = (
-            get_income(rows, "Office Supplies", default=0.0)
-            + get_income(rows, "Packaging Materials", default=0.0)
-            + get_income(rows, "Packaging Service Fee", default=0.0)
-            + get_income(rows, "Retail Shipping Supplies", default=0.0)
+            find_income(rows, "Office Supplies", default=0.0)
+            + find_income(rows, "Packaging Materials", default=0.0)
+            + find_income(rows, "Packaging Service Fee", default=0.0)
+            + find_income(rows, "Retail Shipping Supplies", default=0.0)
         )
 
-        shred_sales = (
-            get_income(rows, "Shred Sales", default=0.0)
-            + get_income(rows, "Shred", default=0.0)
-            + get_income(rows, "Shredding", default=0.0)
-        )
+        shred_sales = find_income(rows, "Shred", default=0.0)
 
         # Derived metrics
-        avg_ups_pkg = (ups_shipping / ups_packages) if (ups_shipping is not None and ups_packages) else None
-        avg_meter_pkg = (meter_sales / ups_packages) if (meter_sales is not None and ups_packages) else None
+        avg_ups_pkg = (ups_shipping / pkgs_for_avgs) if (ups_shipping is not None and pkgs_for_avgs) else None
+        avg_meter_pkg = (meter_sales / pkgs_for_avgs) if (meter_sales is not None and pkgs_for_avgs) else None
 
         # Goals
         monthly_goal = None
@@ -295,39 +799,86 @@ if process:
             else None
         )
         variance = (net_sales - prorated_goal) if (net_sales is not None and prorated_goal is not None) else None
+        variance_pct = (variance / prorated_goal) if (variance is not None and prorated_goal) else None
 
-        rows_out.append({
-            "Center": center or f"(Report #{idx})",
-            "Store": store_name,
-            "Date Range": date_range,
-            "Workweek": "6-day" if is_6day else "7-day",
+        # Labor (budget vs actual)
+        projected_sales_for_labor = total_sales if labor_sales_basis == "Total Sales" else net_sales
+        lb = pick_labor_budget(center, projected_sales_for_labor)
 
-            "Total Sales": total_sales,
-            "Public Service Payments": psp_income,
-            "Net Sales (Sales - PSP)": net_sales,
+        budget_hours = lb["budget_hours"]
+        budget_labor_dollars = lb["budget_labor_dollars"]
+        budget_labor_pct = lb["budget_labor_pct"]
 
-            "Average Meter Per Package": avg_meter_pkg,
-            "Total UPS Shipping": ups_shipping,
-            "Average UPS Package": avg_ups_pkg,
-            "Total Meter Sales": meter_sales,
+        actual_hours = actual_hours_lookup.get(center)
 
-            "Packaging/Office Supplies/Service Fees": packaging_bucket,
-            "Notary + Public Service Payments": notary_plus_psp,
-            "Mailbox Sales": mailbox_sales,
-            "Printing & Copies": printing_copies,
-            "Shred Sales": shred_sales,
+        hourly_rate_est = None
+        actual_labor_dollars_est = None
 
-            "Monthly Goal": monthly_goal,
-            "Prorated Goal (Exact Calendar)": prorated_goal,
-            "Variance vs Prorated Goal": variance,
+        if budget_hours and budget_labor_dollars:
+            hourly_rate_est = float(budget_labor_dollars) / float(budget_hours)
 
-            # For totals / weighted avgs
-            "_ups_packages": ups_packages or 0,
-            "_is_6day": 1 if is_6day else 0
-        })
+        if actual_hours is not None and hourly_rate_est is not None:
+            actual_labor_dollars_est = actual_hours * hourly_rate_est
+
+        labor_hours_var = (actual_hours - budget_hours) if (actual_hours is not None and budget_hours is not None) else None
+        labor_dollars_var = (
+            (actual_labor_dollars_est - budget_labor_dollars)
+            if (actual_labor_dollars_est is not None and budget_labor_dollars is not None)
+            else None
+        )
+
+        actual_labor_pct_est = (
+            (actual_labor_dollars_est / projected_sales_for_labor)
+            if (actual_labor_dollars_est is not None and projected_sales_for_labor)
+            else None
+        )
+
+        rows_out.append(
+            {
+                "Center": center or f"(Report #{idx})",
+                "Store": store_name,
+                "Date Range": date_range,
+                "Workweek": "6-day" if is_6day else "7-day",
+                "Total Sales": total_sales,
+                "Public Service Payments": psp_income,
+                "Net Sales (Sales - PSP)": net_sales,
+                "Prorated Goal (Exact Calendar)": prorated_goal,
+                "Variance vs Prorated Goal": variance,
+                "Variance %": variance_pct,
+                "Total UPS Shipping": ups_shipping,
+                "Average UPS Package": avg_ups_pkg,
+                "UPS Air Packages (NDA/2DA/3Day)": air_ground["air_pkgs"],
+                "UPS Ground Packages": air_ground["ground_pkgs"],
+                "UPS Domestic Packages (Air+Ground)": air_ground["domestic_pkgs"],
+                "Air-to-Ground % (Air/Domestic)": air_ground["air_to_ground_pct"],
+                "Total Meter Sales": meter_sales,
+                "Average Meter Per Package": avg_meter_pkg,
+                "Packaging/Office Supplies/Service Fees": packaging_bucket,
+                "Notary + Public Service Payments": notary_plus_psp,
+                "Mailbox Sales": mailbox_sales,
+                "Printing & Copies": printing_copies,
+                "Shred Sales": shred_sales,
+                "Monthly Goal": monthly_goal,
+                # Labor columns
+                "Kiosk Type": get_kiosk_type(center),
+                "Labor Sales Basis": labor_sales_basis,
+                "Labor Budget Hours": budget_hours,
+                "Labor Budget $": budget_labor_dollars,
+                "Labor Budget %": budget_labor_pct,
+                "Actual Labor Hours": actual_hours,
+                "Est. Hourly Rate (from chart)": hourly_rate_est,
+                "Est. Actual Labor $": actual_labor_dollars_est,
+                "Labor Hours Variance (Actual - Budget)": labor_hours_var,
+                "Labor $ Variance (Est Actual - Budget)": labor_dollars_var,
+                "Est. Actual Labor %": actual_labor_pct_est,
+                # internal helpers
+                "_pkgs_for_avgs": pkgs_for_avgs or 0,
+                "_is_6day": 1 if is_6day else 0,
+            }
+        )
 
     if not rows_out:
-        st.error("No reports pasted yet. Paste at least one report and try again.")
+        st.error("No reports found. Paste at least one report and try again.")
         st.stop()
 
     df = pd.DataFrame(rows_out)
@@ -337,7 +888,7 @@ if process:
     df7 = df[df["_is_6day"] == 0].copy()
 
     def build_totals_row(label: str, dfx: pd.DataFrame):
-        pkgs = dfx["_ups_packages"].sum()
+        pkgs = dfx["_pkgs_for_avgs"].sum()
         ups_ship = dfx["Total UPS Shipping"].sum(min_count=1)
         meter = dfx["Total Meter Sales"].sum(min_count=1)
 
@@ -350,31 +901,69 @@ if process:
 
         pror_goal = dfx["Prorated Goal (Exact Calendar)"].sum(min_count=1)
         var = (net - pror_goal) if (pd.notna(net) and pd.notna(pror_goal)) else None
+        var_pct = (var / pror_goal) if (var is not None and pror_goal) else None
+
+        # Air/Ground totals (sum pkgs then recompute pct)
+        air_pkgs = dfx["UPS Air Packages (NDA/2DA/3Day)"].sum(min_count=1)
+        ground_pkgs = dfx["UPS Ground Packages"].sum(min_count=1)
+        domestic_pkgs = dfx["UPS Domestic Packages (Air+Ground)"].sum(min_count=1)
+
+        # If service lines were missing in some stores, sums may be NaN; handle
+        air_pkgs = None if pd.isna(air_pkgs) else float(air_pkgs)
+        ground_pkgs = None if pd.isna(ground_pkgs) else float(ground_pkgs)
+        domestic_pkgs = None if pd.isna(domestic_pkgs) else float(domestic_pkgs)
+        air_pct = (air_pkgs / domestic_pkgs) if (air_pkgs is not None and domestic_pkgs) else None
+
+        # Labor totals (budget hours/$ sum; actual hours sum; est actual $ sum)
+        labor_budget_hours = dfx["Labor Budget Hours"].sum(min_count=1)
+        labor_budget_dollars = dfx["Labor Budget $"].sum(min_count=1)
+        actual_hours = dfx["Actual Labor Hours"].sum(min_count=1)
+        est_actual_dollars = dfx["Est. Actual Labor $"].sum(min_count=1)
+
+        labor_budget_hours = None if pd.isna(labor_budget_hours) else float(labor_budget_hours)
+        labor_budget_dollars = None if pd.isna(labor_budget_dollars) else float(labor_budget_dollars)
+        actual_hours = None if pd.isna(actual_hours) else float(actual_hours)
+        est_actual_dollars = None if pd.isna(est_actual_dollars) else float(est_actual_dollars)
+
+        labor_hours_var = (actual_hours - labor_budget_hours) if (actual_hours is not None and labor_budget_hours is not None) else None
+        labor_dollars_var = (
+            (est_actual_dollars - labor_budget_dollars)
+            if (est_actual_dollars is not None and labor_budget_dollars is not None)
+            else None
+        )
 
         return {
             "Center": label,
             "Store": "",
             "Date Range": "",
             "Workweek": "",
-
             "Total Sales": ts,
             "Public Service Payments": psp,
             "Net Sales (Sales - PSP)": net,
-
-            "Average Meter Per Package": avg_meter,
+            "Prorated Goal (Exact Calendar)": pror_goal,
+            "Variance vs Prorated Goal": var,
+            "Variance %": var_pct,
             "Total UPS Shipping": ups_ship,
             "Average UPS Package": avg_ups,
+            "UPS Air Packages (NDA/2DA/3Day)": air_pkgs,
+            "UPS Ground Packages": ground_pkgs,
+            "UPS Domestic Packages (Air+Ground)": domestic_pkgs,
+            "Air-to-Ground % (Air/Domestic)": air_pct,
             "Total Meter Sales": meter,
-
+            "Average Meter Per Package": avg_meter,
             "Packaging/Office Supplies/Service Fees": dfx["Packaging/Office Supplies/Service Fees"].sum(min_count=1),
             "Notary + Public Service Payments": dfx["Notary + Public Service Payments"].sum(min_count=1),
             "Mailbox Sales": dfx["Mailbox Sales"].sum(min_count=1),
             "Printing & Copies": dfx["Printing & Copies"].sum(min_count=1),
             "Shred Sales": dfx["Shred Sales"].sum(min_count=1),
-
             "Monthly Goal": dfx["Monthly Goal"].sum(min_count=1),
-            "Prorated Goal (Exact Calendar)": pror_goal,
-            "Variance vs Prorated Goal": var,
+            # Labor summary
+            "Labor Budget Hours": labor_budget_hours,
+            "Labor Budget $": labor_budget_dollars,
+            "Actual Labor Hours": actual_hours,
+            "Est. Actual Labor $": est_actual_dollars,
+            "Labor Hours Variance (Actual - Budget)": labor_hours_var,
+            "Labor $ Variance (Est Actual - Budget)": labor_dollars_var,
         }
 
     footer_rows = []
@@ -384,22 +973,61 @@ if process:
         footer_rows.append(build_totals_row("TOTAL (7-day stores)", df7))
     footer_rows.append(build_totals_row("TOTAL (All stores)", df))
 
-    df_display = df.drop(columns=["_ups_packages", "_is_6day"], errors="ignore")
+    df_display = df.drop(columns=["_pkgs_for_avgs", "_is_6day"], errors="ignore")
     df_display = pd.concat([df_display, pd.DataFrame(footer_rows)], ignore_index=True)
 
-    # Column order
+    # Column order (your recap order + new metrics)
     col_order = [
-        "Center", "Store", "Date Range", "Workweek",
-        "Total Sales", "Public Service Payments", "Net Sales (Sales - PSP)",
-        "Average Meter Per Package", "Total UPS Shipping", "Average UPS Package", "Total Meter Sales",
-        "Packaging/Office Supplies/Service Fees", "Notary + Public Service Payments",
-        "Mailbox Sales", "Printing & Copies", "Shred Sales",
-        "Monthly Goal", "Prorated Goal (Exact Calendar)", "Variance vs Prorated Goal",
+        "Center",
+        "Store",
+        "Date Range",
+        "Workweek",
+        "Total Sales",
+        "Public Service Payments",
+        "Net Sales (Sales - PSP)",
+        "Total UPS Shipping",
+        "Average UPS Package",
+        "UPS Air Packages (NDA/2DA/3Day)",
+        "UPS Ground Packages",
+        "UPS Domestic Packages (Air+Ground)",
+        "Air-to-Ground % (Air/Domestic)",
+        "Total Meter Sales",
+        "Average Meter Per Package",
+        "Packaging/Office Supplies/Service Fees",
+        "Notary + Public Service Payments",
+        "Mailbox Sales",
+        "Printing & Copies",
+        "Shred Sales",
+        "Monthly Goal",
+        "Prorated Goal (Exact Calendar)",
+        "Variance vs Prorated Goal",
+        "Variance %",
+        # Labor
+        "Kiosk Type",
+        "Labor Sales Basis",
+        "Labor Budget Hours",
+        "Labor Budget $",
+        "Labor Budget %",
+        "Actual Labor Hours",
+        "Est. Hourly Rate (from chart)",
+        "Est. Actual Labor $",
+        "Labor Hours Variance (Actual - Budget)",
+        "Labor $ Variance (Est Actual - Budget)",
+        "Est. Actual Labor %",
     ]
     df_display = df_display[[c for c in col_order if c in df_display.columns]]
 
+    # Results table
     st.subheader("Results (All Stores)")
     st.dataframe(df_display, use_container_width=True)
+
+    # Diagnostics
+    if diagnostics:
+        with st.expander("Diagnostics (Parsing / Missing Fields)", expanded=False):
+            for msg in diagnostics:
+                st.write(f"- {msg}")
+            st.write("")
+            st.write("Tip: Air-to-Ground requires service-level UPS lines (NDA/2DA/3 Day/Ground). If not present, those fields will show —.")
 
     # Excel export
     buffer = io.BytesIO()
@@ -411,26 +1039,31 @@ if process:
         data=buffer.getvalue(),
         file_name="multi_store_recap.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        use_container_width=True,
     )
 
-    # Quick summary
+    # Quick summary (copy/paste)
     st.subheader("Quick Summary")
     lines = []
     for _, r in df.iterrows():
         lines.append(
             f"{r['Center']} {r['Store']} ({r['Workweek']}): "
             f"Net {fmt_money(r['Net Sales (Sales - PSP)'])} | "
+            f"Goal {fmt_money(r['Prorated Goal (Exact Calendar)'])} | "
+            f"Var {fmt_money(r['Variance vs Prorated Goal'])} ({fmt_pct(r.get('Variance %'))}) | "
             f"UPS {fmt_money(r['Total UPS Shipping'])} (Avg {fmt_money(r['Average UPS Package'])}) | "
-            f"Meter {fmt_money(r['Total Meter Sales'])} (Avg {fmt_money(r['Average Meter Per Package'])}) | "
-            f"Goal {fmt_money(r['Prorated Goal (Exact Calendar)'])} | Var {fmt_money(r['Variance vs Prorated Goal'])}"
+            f"A/G {fmt_pct(r.get('Air-to-Ground % (Air/Domestic)'))} | "
+            f"Labor Hrs {('—' if pd.isna(r.get('Actual Labor Hours')) else r.get('Actual Labor Hours'))} "
+            f"vs Bud {('—' if pd.isna(r.get('Labor Budget Hours')) else r.get('Labor Budget Hours'))}"
         )
 
     lines.append("")
     for fr in footer_rows:
         lines.append(
-            f"{fr['Center']}: Net {fmt_money(fr['Net Sales (Sales - PSP)'])} | "
-            f"Goal {fmt_money(fr['Prorated Goal (Exact Calendar)'])} | Var {fmt_money(fr['Variance vs Prorated Goal'])}"
+            f"{fr['Center']}: Net {fmt_money(fr.get('Net Sales (Sales - PSP)'))} | "
+            f"Goal {fmt_money(fr.get('Prorated Goal (Exact Calendar)'))} | "
+            f"Var {fmt_money(fr.get('Variance vs Prorated Goal'))} ({fmt_pct(fr.get('Variance %'))}) | "
+            f"Labor $ Var {fmt_money(fr.get('Labor $ Variance (Est Actual - Budget)'))}"
         )
 
     st.text_area("Copy/paste summary", "\n".join(lines), height=280)
