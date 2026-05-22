@@ -6,9 +6,23 @@ import streamlit as st
 st.set_page_config(page_title="Year Over Year Store Comparison", layout="wide")
 
 st.title("Year Over Year Store Comparison")
-st.caption("Paste Worker Sales by Product Category reports for 2026 and 2025. The app compares Sales, UPS, Mailbox, and Notary.")
+st.caption("Compares Sales, UPS, Mailbox, Notary, Packing, and Public Service Payments year over year.")
 
 CENTER_ORDER = ["1504", "5027", "5052", "5255", "5778", "6176", "6769", "7261"]
+
+CATEGORIES = [
+    "Sales",
+    "UPS",
+    "UPS %",
+    "Mailbox",
+    "Mailbox %",
+    "Notary",
+    "Notary %",
+    "Packing",
+    "Packing %",
+    "Public Service Payments",
+    "Public Service Payments %",
+]
 
 def money_to_float(x):
     return float(x.replace("$", "").replace(",", "").strip())
@@ -25,8 +39,7 @@ def parse_report(text):
     )
 
     for category, income in line_re.findall(text):
-        category = category.strip().lower()
-        rows[category] = money_to_float(income)
+        rows[category.strip().lower()] = money_to_float(income)
 
     totals_match = re.search(
         r"Totals\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})",
@@ -46,19 +59,63 @@ def parse_report(text):
     ups = find_income(["shipping charges"])
     mailbox = find_income(["mailbox"])
     notary = find_income(["notary"])
+    psp = find_income(["public service payments", "public svcs payments", "psp"])
+
+    packing = find_income([
+        "packaging materials",
+        "packing materials",
+        "packaging service fee",
+        "packing service fee",
+        "retail shipping supplies",
+        "office supplies",
+    ])
+
+    def pct(amount):
+        return amount / total_sales if total_sales else 0
 
     return {
         "Center": center,
         "Sales": total_sales,
         "UPS": ups,
+        "UPS %": pct(ups),
         "Mailbox": mailbox,
+        "Mailbox %": pct(mailbox),
         "Notary": notary,
+        "Notary %": pct(notary),
+        "Packing": packing,
+        "Packing %": pct(packing),
+        "Public Service Payments": psp,
+        "Public Service Payments %": pct(psp),
     }
 
-def format_money(df):
+def format_table(df):
     out = df.copy()
-    for col in ["Sales", "UPS", "Mailbox", "Notary"]:
-        out[col] = out[col].apply(lambda x: f"${x:,.0f}")
+
+    money_cols = [
+        "Sales",
+        "UPS",
+        "Mailbox",
+        "Notary",
+        "Packing",
+        "Public Service Payments",
+    ]
+
+    pct_cols = [
+        "UPS %",
+        "Mailbox %",
+        "Notary %",
+        "Packing %",
+        "Public Service Payments %",
+    ]
+
+    for col in money_cols:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda x: f"${x:,.0f}")
+
+    for col in pct_cols:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda x: f"{x:.1%}")
+
     return out
 
 def style_variance(val):
@@ -107,26 +164,47 @@ if st.button("Compare Reports", type="primary", use_container_width=True):
 
     variance = df_2026.copy()
 
-    for col in ["Sales", "UPS", "Mailbox", "Notary"]:
+    compare_cols = [
+        "Sales",
+        "UPS",
+        "UPS %",
+        "Mailbox",
+        "Mailbox %",
+        "Notary",
+        "Notary %",
+        "Packing",
+        "Packing %",
+        "Public Service Payments",
+        "Public Service Payments %",
+    ]
+
+    for col in compare_cols:
         variance[col] = df_2026[col].fillna(0) - df_2025[col].fillna(0)
 
     st.markdown("## Gross Sales - All Profit Centers")
 
     st.markdown("### 2026")
-    st.dataframe(format_money(df_2026), hide_index=True, use_container_width=True)
+    st.dataframe(format_table(df_2026), hide_index=True, use_container_width=True)
 
     st.markdown("### 2025")
-    st.dataframe(format_money(df_2025), hide_index=True, use_container_width=True)
+    st.dataframe(format_table(df_2025), hide_index=True, use_container_width=True)
 
     st.markdown("### Variance Compared to Last Year")
     st.dataframe(
         variance.style
-        .map(style_variance, subset=["Sales", "UPS", "Mailbox", "Notary"])
+        .map(style_variance, subset=compare_cols)
         .format({
             "Sales": "${:,.0f}",
             "UPS": "${:,.0f}",
+            "UPS %": "{:.1%}",
             "Mailbox": "${:,.0f}",
+            "Mailbox %": "{:.1%}",
             "Notary": "${:,.0f}",
+            "Notary %": "{:.1%}",
+            "Packing": "${:,.0f}",
+            "Packing %": "{:.1%}",
+            "Public Service Payments": "${:,.0f}",
+            "Public Service Payments %": "{:.1%}",
         }),
         hide_index=True,
         use_container_width=True
