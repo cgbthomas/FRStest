@@ -1,4 +1,3 @@
-# streamlit_app.py
 import re
 import pandas as pd
 import streamlit as st
@@ -75,13 +74,34 @@ def parse_report(text):
         "office supplies",
     ])
 
-    avg_ups_match = re.search(
-        r"(customer average|average shipment|avg shipment|average shipping sale|avg shipping sale).*?\$([\d,]+\.\d{2})",
+    # Average UPS Sale - pulls Customer Average from Shipping Charges / UPS row
+    avg_ups_sale = 0
+
+    shipping_line_match = re.search(
+        r"^.*shipping charges.*ups.*$",
         text,
-        re.I
+        re.I | re.MULTILINE
     )
 
-    avg_ups_sale = money_to_float(avg_ups_match.group(2)) if avg_ups_match else 0
+    if shipping_line_match:
+        shipping_line = shipping_line_match.group(0)
+        dollar_values = re.findall(r"\$([\d,]+\.\d{2})", shipping_line)
+
+        # FRS usually has Income first and Customer Average later.
+        # Customer Average is usually the last dollar value on the Shipping Charges / UPS line.
+        if len(dollar_values) >= 2:
+            avg_ups_sale = money_to_float(dollar_values[-1])
+        elif len(dollar_values) == 1:
+            avg_ups_sale = money_to_float(dollar_values[0])
+
+    # Backup search if the Shipping Charges / UPS line does not pull correctly
+    if avg_ups_sale == 0:
+        avg_ups_match = re.search(
+            r"customer average.*?\$([\d,]+\.\d{2})",
+            text,
+            re.I | re.S
+        )
+        avg_ups_sale = money_to_float(avg_ups_match.group(1)) if avg_ups_match else 0
 
     pack_vs_ups = total_packing / ups if ups else 0
 
